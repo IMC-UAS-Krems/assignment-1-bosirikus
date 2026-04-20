@@ -32,6 +32,7 @@ class StreamingPlatform:
 
     def record_session(self, session: ListeningSession) -> None:
         self._sessions.append(session)
+        session.user.add_session(session)
 
     def get_track(self, track_id: str) -> Track | None:
         return self._catalogue.get(track_id)

@@ -18,11 +18,15 @@ Run with:
 """
 
 import pytest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 
 from streaming.platform import StreamingPlatform
 from streaming.users import FreeUser, PremiumUser, FamilyAccountUser, FamilyMember
-from streaming.playlists import CollaborativePlaylist
+from streaming.playlists import CollaborativePlaylist, Playlist
+from streaming.artists import Artist
+from streaming.sessions import ListeningSession
+from streaming.tracks import AlbumTrack
+from streaming.albums import Album
 from tests.conftest import FIXED_NOW, RECENT, OLD
 
 
@@ -31,11 +35,7 @@ from tests.conftest import FIXED_NOW, RECENT, OLD
 # ===========================================================================
 
 class TestTotalListeningTime:
-    """Test the total_listening_time_minutes(start, end) method.
-    
-    This method should sum up all session durations that fall within
-    the specified datetime window (inclusive on both ends).
-    """
+    """Test the total_listening_time_minutes(start, end) method."""
 
     def test_returns_float(self, platform: StreamingPlatform) -> None:
         """Verify the method returns a float."""
@@ -52,10 +52,27 @@ class TestTotalListeningTime:
         )
         assert result == 0.0
 
-    # TODO: Add a test that verifies the correct value for a known time period.
-    #       Calculate the expected total based on the fixture data in conftest.py.
     def test_known_period_value(self, platform: StreamingPlatform) -> None:
-        pass
+        """Verify the correct total is returned for a known time window.
+
+        Alice listens to t1 for 120s and Bob listens to t2 for 180s,
+        both at RECENT. Total = (120 + 180) / 60 = 5.0 minutes.
+        The OLD session (60 days ago) should not be counted.
+        """
+        alice = platform.get_user("u1")
+        bob = platform.get_user("u2")
+        t1 = platform.get_track("t1")
+        t2 = platform.get_track("t2")
+
+        platform.record_session(ListeningSession("s1", alice, t1, RECENT, 120))
+        platform.record_session(ListeningSession("s2", bob, t2, RECENT, 180))
+        # This session is outside the window and should be excluded
+        platform.record_session(ListeningSession("s3", alice, t1, OLD, 600))
+
+        start = RECENT - timedelta(minutes=1)
+        end = FIXED_NOW
+        result = platform.total_listening_time_minutes(start, end)
+        assert result == 5.0
 
 
 # ===========================================================================
@@ -63,13 +80,7 @@ class TestTotalListeningTime:
 # ===========================================================================
 
 class TestAvgUniqueTracksPremium:
-    """Test the avg_unique_tracks_per_premium_user(days) method.
-    
-    This method should:
-    - Count distinct tracks per PremiumUser in the last N days
-    - Exclude FreeUser, FamilyAccountUser, and FamilyMember
-    - Return 0.0 if there are no premium users
-    """
+    """Test the avg_unique_tracks_per_premium_user(days) method."""
 
     def test_returns_float(self, platform: StreamingPlatform) -> None:
         """Verify the method returns a float."""
@@ -82,11 +93,25 @@ class TestAvgUniqueTracksPremium:
         p.add_user(FreeUser("u99", "Nobody", age=25))
         assert p.avg_unique_tracks_per_premium_user() == 0.0
 
-    # TODO: Add a test with the fixture platform that verifies the correct
-    #       average for premium users. You'll need to count unique tracks
-    #       per premium user and calculate the average.
     def test_correct_value(self, platform: StreamingPlatform) -> None:
-        pass
+        """Bob is the only PremiumUser. He listens to t1 and t2 within the
+        last 30 days (both at RECENT = 10 days ago). He also listens to t3
+        at OLD (60 days ago) which should be excluded. Expected average = 2.0.
+        """
+        bob = platform.get_user("u2")
+        t1 = platform.get_track("t1")
+        t2 = platform.get_track("t2")
+        t3 = platform.get_track("t3")
+
+        platform.record_session(ListeningSession("s1", bob, t1, RECENT, 120))
+        platform.record_session(ListeningSession("s2", bob, t2, RECENT, 120))
+        # Same track again — should not count as a second unique track
+        platform.record_session(ListeningSession("s3", bob, t1, RECENT, 120))
+        # Outside the 30-day window — should be excluded
+        platform.record_session(ListeningSession("s4", bob, t3, OLD, 120))
+
+        result = platform.avg_unique_tracks_per_premium_user(days=30)
+        assert result == 2.0
 
 
 # ===========================================================================
@@ -94,23 +119,29 @@ class TestAvgUniqueTracksPremium:
 # ===========================================================================
 
 class TestTrackMostDistinctListeners:
-    """Test the track_with_most_distinct_listeners() method.
-    
-    This method should:
-    - Count the number of unique users who have listened to each track
-    - Return the track with the highest count
-    - Return None if the platform has no sessions
-    """
+    """Test the track_with_most_distinct_listeners() method."""
 
     def test_empty_platform_returns_none(self) -> None:
         """Test that an empty platform returns None."""
         p = StreamingPlatform("Empty")
         assert p.track_with_most_distinct_listeners() is None
 
-    # TODO: Add a test that verifies the correct track is returned.
-    #       Count listeners per track from the fixture data.
     def test_correct_track(self, platform: StreamingPlatform) -> None:
-        pass
+        """t1 is heard by both Alice and Bob (2 distinct listeners).
+        t2 is only heard by Alice (1 distinct listener).
+        The method should return t1.
+        """
+        alice = platform.get_user("u1")
+        bob = platform.get_user("u2")
+        t1 = platform.get_track("t1")
+        t2 = platform.get_track("t2")
+
+        platform.record_session(ListeningSession("s1", alice, t1, RECENT, 120))
+        platform.record_session(ListeningSession("s2", bob, t1, RECENT, 120))
+        platform.record_session(ListeningSession("s3", alice, t2, RECENT, 120))
+
+        result = platform.track_with_most_distinct_listeners()
+        assert result == t1
 
 
 # ===========================================================================
@@ -118,16 +149,14 @@ class TestTrackMostDistinctListeners:
 # ===========================================================================
 
 class TestAvgSessionDurationByType:
-    """Test the avg_session_duration_by_user_type() method.
-    
-    This method should:
-    - Calculate average session duration (in seconds) for each user type
-    - Return a list of (type_name, average_duration) tuples
-    - Sort results from longest to shortest duration
-    """
+    """Test the avg_session_duration_by_user_type() method."""
 
     def test_returns_list_of_tuples(self, platform: StreamingPlatform) -> None:
         """Verify the method returns a list of (str, float) tuples."""
+        alice = platform.get_user("u1")
+        t1 = platform.get_track("t1")
+        platform.record_session(ListeningSession("s1", alice, t1, RECENT, 120))
+
         result = platform.avg_session_duration_by_user_type()
         assert isinstance(result, list)
         for item in result:
@@ -136,13 +165,31 @@ class TestAvgSessionDurationByType:
 
     def test_sorted_descending(self, platform: StreamingPlatform) -> None:
         """Verify results are sorted by duration (longest first)."""
+        alice = platform.get_user("u1")
+        bob = platform.get_user("u2")
+        t1 = platform.get_track("t1")
+        t2 = platform.get_track("t2")
+        platform.record_session(ListeningSession("s1", alice, t1, RECENT, 60))
+        platform.record_session(ListeningSession("s2", bob, t2, RECENT, 300))
+
         result = platform.avg_session_duration_by_user_type()
         durations = [r[1] for r in result]
         assert durations == sorted(durations, reverse=True)
 
-    # TODO: Add tests to verify all user types are present and have correct averages.
     def test_all_user_types_present(self, platform: StreamingPlatform) -> None:
-        pass
+        """When sessions exist for both FreeUser and PremiumUser,
+        both type names should appear in the result.
+        """
+        alice = platform.get_user("u1")
+        bob = platform.get_user("u2")
+        t1 = platform.get_track("t1")
+        platform.record_session(ListeningSession("s1", alice, t1, RECENT, 120))
+        platform.record_session(ListeningSession("s2", bob, t1, RECENT, 300))
+
+        result = platform.avg_session_duration_by_user_type()
+        type_names = [r[0] for r in result]
+        assert "FreeUser" in type_names
+        assert "PremiumUser" in type_names
 
 
 # ===========================================================================
@@ -150,13 +197,7 @@ class TestAvgSessionDurationByType:
 # ===========================================================================
 
 class TestUnderageSubUserListening:
-    """Test the total_listening_time_underage_sub_users_minutes(age_threshold) method.
-    
-    This method should:
-    - Count only sessions for FamilyMember users under the age threshold
-    - Convert to minutes
-    - Return 0.0 if no underage users or their sessions exist
-    """
+    """Test the total_listening_time_underage_sub_users_minutes() method."""
 
     def test_returns_float(self, platform: StreamingPlatform) -> None:
         """Verify the method returns a float."""
@@ -169,12 +210,42 @@ class TestUnderageSubUserListening:
         p.add_user(FreeUser("u1", "Solo", age=20))
         assert p.total_listening_time_underage_sub_users_minutes() == 0.0
 
-    # TODO: Add tests for correct values with default and custom thresholds.
     def test_correct_value_default_threshold(self, platform: StreamingPlatform) -> None:
-        pass
+        """A FamilyMember aged 16 (under default threshold of 18) listens for
+        240 seconds. Expected total = 240 / 60 = 4.0 minutes.
+        The adult member (age 20) should not be counted.
+        """
+        parent = FamilyAccountUser("u3", "Parent", age=40)
+        child = FamilyMember("u4", "Child", age=16, parent=parent)
+        adult_member = FamilyMember("u5", "OldChild", age=20, parent=parent)
+        parent.add_sub_user(child)
+        parent.add_sub_user(adult_member)
+        platform.add_user(parent)
+        platform.add_user(child)
+        platform.add_user(adult_member)
+
+        t1 = platform.get_track("t1")
+        platform.record_session(ListeningSession("s1", child, t1, RECENT, 240))
+        platform.record_session(ListeningSession("s2", adult_member, t1, RECENT, 300))
+
+        result = platform.total_listening_time_underage_sub_users_minutes()
+        assert result == 4.0
 
     def test_custom_threshold(self, platform: StreamingPlatform) -> None:
-        pass
+        """With threshold=15, a 16-year-old should NOT be counted.
+        Only members strictly under the threshold are included.
+        """
+        parent = FamilyAccountUser("u3", "Parent", age=40)
+        child = FamilyMember("u4", "Child", age=16, parent=parent)
+        parent.add_sub_user(child)
+        platform.add_user(parent)
+        platform.add_user(child)
+
+        t1 = platform.get_track("t1")
+        platform.record_session(ListeningSession("s1", child, t1, RECENT, 300))
+
+        result = platform.total_listening_time_underage_sub_users_minutes(age_threshold=15)
+        assert result == 0.0
 
 
 # ===========================================================================
@@ -182,18 +253,14 @@ class TestUnderageSubUserListening:
 # ===========================================================================
 
 class TestTopArtistsByListeningTime:
-    """Test the top_artists_by_listening_time(n) method.
-    
-    This method should:
-    - Rank artists by total cumulative listening time (minutes)
-    - Only count Song tracks (exclude Podcast and AudiobookTrack)
-    - Return a list of (Artist, minutes) tuples
-    - Sort from highest to lowest listening time
-    """
+    """Test the top_artists_by_listening_time(n) method."""
 
     def test_returns_list_of_tuples(self, platform: StreamingPlatform) -> None:
         """Verify the method returns a list of (Artist, float) tuples."""
-        from streaming.artists import Artist
+        alice = platform.get_user("u1")
+        t1 = platform.get_track("t1")
+        platform.record_session(ListeningSession("s1", alice, t1, RECENT, 180))
+
         result = platform.top_artists_by_listening_time(n=3)
         assert isinstance(result, list)
         for item in result:
@@ -202,18 +269,47 @@ class TestTopArtistsByListeningTime:
 
     def test_sorted_descending(self, platform: StreamingPlatform) -> None:
         """Verify results are sorted by listening time (highest first)."""
+        alice = platform.get_user("u1")
+        t1 = platform.get_track("t1")
+        t2 = platform.get_track("t2")
+
+        second_artist = Artist("a2", "Second", genre="rock")
+        second_track = AlbumTrack("t99", "Rock Song", 120, "rock", second_artist, track_number=1)
+        platform.add_artist(second_artist)
+        platform.add_track(second_track)
+
+        platform.record_session(ListeningSession("s1", alice, t1, RECENT, 600))
+        platform.record_session(ListeningSession("s2", alice, second_track, RECENT, 60))
+
         result = platform.top_artists_by_listening_time(n=5)
         minutes = [r[1] for r in result]
         assert minutes == sorted(minutes, reverse=True)
 
     def test_respects_n_parameter(self, platform: StreamingPlatform) -> None:
         """Verify only the top N artists are returned."""
+        alice = platform.get_user("u1")
+        t1 = platform.get_track("t1")
+        platform.record_session(ListeningSession("s1", alice, t1, RECENT, 120))
+
         result = platform.top_artists_by_listening_time(n=2)
         assert len(result) <= 2
 
-    # TODO: Add a test that verifies the correct artists and values.
     def test_top_artist(self, platform: StreamingPlatform) -> None:
-        pass
+        """Pixels is the only artist. Alice listens to t1 for 120s and t2
+        for 180s. Total for Pixels = (120 + 180) / 60 = 5.0 minutes.
+        """
+        alice = platform.get_user("u1")
+        t1 = platform.get_track("t1")
+        t2 = platform.get_track("t2")
+        pixels = platform.get_artist("a1")
+
+        platform.record_session(ListeningSession("s1", alice, t1, RECENT, 120))
+        platform.record_session(ListeningSession("s2", alice, t2, RECENT, 180))
+
+        result = platform.top_artists_by_listening_time(n=1)
+        assert len(result) == 1
+        assert result[0][0] == pixels
+        assert result[0][1] == 5.0
 
 
 # ===========================================================================
@@ -221,13 +317,7 @@ class TestTopArtistsByListeningTime:
 # ===========================================================================
 
 class TestUserTopGenre:
-    """Test the user_top_genre(user_id) method.
-    
-    This method should:
-    - Find the genre with the most listening time for a user
-    - Return (genre_name, percentage_of_total_time)
-    - Return None if user doesn't exist or has no sessions
-    """
+    """Test the user_top_genre(user_id) method."""
 
     def test_returns_tuple_or_none(self, platform: StreamingPlatform) -> None:
         """Verify the method returns a tuple or None."""
@@ -242,15 +332,30 @@ class TestUserTopGenre:
 
     def test_percentage_in_valid_range(self, platform: StreamingPlatform) -> None:
         """Verify percentage is between 0 and 100."""
+        alice = platform.get_user("u1")
+        t1 = platform.get_track("t1")
+        platform.record_session(ListeningSession("s1", alice, t1, RECENT, 180))
+
         for user in platform.all_users():
             result = platform.user_top_genre(user.user_id)
             if result is not None:
                 _, pct = result
                 assert 0.0 <= pct <= 100.0
 
-    # TODO: Add a test that verifies the correct genre and percentage for a known user.
     def test_correct_top_genre(self, platform: StreamingPlatform) -> None:
-        pass
+        """All tracks in the fixture are genre 'pop'. Alice listens to t1
+        and t2, both pop. Top genre should be 'pop' at 100%.
+        """
+        alice = platform.get_user("u1")
+        t1 = platform.get_track("t1")
+        t2 = platform.get_track("t2")
+
+        platform.record_session(ListeningSession("s1", alice, t1, RECENT, 180))
+        platform.record_session(ListeningSession("s2", alice, t2, RECENT, 120))
+
+        genre, pct = platform.user_top_genre("u1")
+        assert genre == "pop"
+        assert pct == 100.0
 
 
 # ===========================================================================
@@ -258,13 +363,7 @@ class TestUserTopGenre:
 # ===========================================================================
 
 class TestCollaborativePlaylistsManyArtists:
-    """Test the collaborative_playlists_with_many_artists(threshold) method.
-    
-    This method should:
-    - Return all CollaborativePlaylist instances with >threshold distinct artists
-    - Only count Song tracks (exclude Podcast and AudiobookTrack)
-    - Return playlists in registration order
-    """
+    """Test the collaborative_playlists_with_many_artists(threshold) method."""
 
     def test_returns_list_of_collaborative_playlists(
         self, platform: StreamingPlatform
@@ -282,10 +381,37 @@ class TestCollaborativePlaylistsManyArtists:
         result = platform.collaborative_playlists_with_many_artists(threshold=100)
         assert result == []
 
-    # TODO: Add tests that verify the correct playlists are returned with
-    #       different threshold values.
     def test_default_threshold(self, platform: StreamingPlatform) -> None:
-        pass
+        """A collaborative playlist with songs from 4 distinct artists should
+        be returned with the default threshold of 3. A playlist with only
+        1 artist should not be returned.
+        """
+        alice = platform.get_user("u1")
+
+        # Build 4 artists and 4 tracks
+        artists = [Artist(f"ax{i}", f"Artist {i}", genre="pop") for i in range(4)]
+        tracks = []
+        for i, artist in enumerate(artists):
+            track = AlbumTrack(f"tx{i}", f"Song {i}", 120, "pop", artist,
+                               track_number=1)
+            platform.add_artist(artist)
+            platform.add_track(track)
+            tracks.append(track)
+
+        # Playlist with 4 distinct artists — should pass threshold=3
+        big_collab = CollaborativePlaylist("cp1", "Big Collab", owner=alice)
+        for track in tracks:
+            big_collab.add_track(track)
+        platform.add_playlist(big_collab)
+
+        # Playlist with only 1 artist — should not pass threshold=3
+        small_collab = CollaborativePlaylist("cp2", "Small Collab", owner=alice)
+        small_collab.add_track(platform.get_track("t1"))
+        platform.add_playlist(small_collab)
+
+        result = platform.collaborative_playlists_with_many_artists(threshold=3)
+        assert big_collab in result
+        assert small_collab not in result
 
 
 # ===========================================================================
@@ -293,14 +419,7 @@ class TestCollaborativePlaylistsManyArtists:
 # ===========================================================================
 
 class TestAvgTracksPerPlaylistType:
-    """Test the avg_tracks_per_playlist_type() method.
-    
-    This method should:
-    - Calculate average track count for standard Playlist instances
-    - Calculate average track count for CollaborativePlaylist instances
-    - Return a dict with keys "Playlist" and "CollaborativePlaylist"
-    - Return 0.0 for types with no instances
-    """
+    """Test the avg_tracks_per_playlist_type() method."""
 
     def test_returns_dict_with_both_keys(
         self, platform: StreamingPlatform
@@ -311,14 +430,56 @@ class TestAvgTracksPerPlaylistType:
         assert "Playlist" in result
         assert "CollaborativePlaylist" in result
 
-    # TODO: Add tests that verify the correct averages for each playlist type.
     def test_standard_playlist_average(self, platform: StreamingPlatform) -> None:
-        pass
+        """Two standard playlists: one with 2 tracks and one with 4 tracks.
+        Expected average = (2 + 4) / 2 = 3.0.
+        """
+        alice = platform.get_user("u1")
+        t1 = platform.get_track("t1")
+        t2 = platform.get_track("t2")
+        t3 = platform.get_track("t3")
+
+        p1 = Playlist("p1", "Short", owner=alice)
+        p1.add_track(t1)
+        p1.add_track(t2)
+
+        p2 = Playlist("p2", "Long", owner=alice)
+        p2.add_track(t1)
+        p2.add_track(t2)
+        p2.add_track(t3)
+        p2.add_track(t3)  # duplicate — should not be added twice
+
+        platform.add_playlist(p1)
+        platform.add_playlist(p2)
+
+        result = platform.avg_tracks_per_playlist_type()
+        # p1 has 2 tracks, p2 has 3 tracks (t3 deduped) → avg = 2.5
+        assert result["Playlist"] == 2.5
 
     def test_collaborative_playlist_average(
         self, platform: StreamingPlatform
     ) -> None:
-        pass
+        """One collaborative playlist with 3 tracks. Expected average = 3.0."""
+        alice = platform.get_user("u1")
+        t1 = platform.get_track("t1")
+        t2 = platform.get_track("t2")
+        t3 = platform.get_track("t3")
+
+        cp = CollaborativePlaylist("cp1", "Collab", owner=alice)
+        cp.add_track(t1)
+        cp.add_track(t2)
+        cp.add_track(t3)
+        platform.add_playlist(cp)
+
+        result = platform.avg_tracks_per_playlist_type()
+        assert result["CollaborativePlaylist"] == 3.0
+
+    def test_no_instances_returns_zero(self) -> None:
+        """A platform with no playlists should return 0.0 for both types."""
+        p = StreamingPlatform("Empty")
+        result = p.avg_tracks_per_playlist_type()
+        assert result["Playlist"] == 0.0
+        assert result["CollaborativePlaylist"] == 0.0
 
 
 # ===========================================================================
@@ -326,18 +487,19 @@ class TestAvgTracksPerPlaylistType:
 # ===========================================================================
 
 class TestUsersWhoCompletedAlbums:
-    """Test the users_who_completed_albums() method.
-    
-    This method should:
-    - Return users who have listened to every track on at least one album
-    - Return (User, [album_titles]) tuples
-    - Include all completed albums for each user
-    - Ignore albums with no tracks
-    """
+    """Test the users_who_completed_albums() method."""
 
     def test_returns_list_of_tuples(self, platform: StreamingPlatform) -> None:
         """Verify the method returns a list of (User, list) tuples."""
         from streaming.users import User
+        bob = platform.get_user("u2")
+        t1 = platform.get_track("t1")
+        t2 = platform.get_track("t2")
+        t3 = platform.get_track("t3")
+        platform.record_session(ListeningSession("s1", bob, t1, RECENT, 180))
+        platform.record_session(ListeningSession("s2", bob, t2, RECENT, 210))
+        platform.record_session(ListeningSession("s3", bob, t3, RECENT, 195))
+
         result = platform.users_who_completed_albums()
         assert isinstance(result, list)
         for item in result:
@@ -348,13 +510,57 @@ class TestUsersWhoCompletedAlbums:
         self, platform: StreamingPlatform
     ) -> None:
         """Verify all completed album titles are strings."""
+        bob = platform.get_user("u2")
+        t1 = platform.get_track("t1")
+        t2 = platform.get_track("t2")
+        t3 = platform.get_track("t3")
+        platform.record_session(ListeningSession("s1", bob, t1, RECENT, 180))
+        platform.record_session(ListeningSession("s2", bob, t2, RECENT, 210))
+        platform.record_session(ListeningSession("s3", bob, t3, RECENT, 195))
+
         result = platform.users_who_completed_albums()
         for _, titles in result:
             assert all(isinstance(t, str) for t in titles)
 
-    # TODO: Add tests that verify the correct users and albums are identified.
     def test_correct_users_identified(self, platform: StreamingPlatform) -> None:
-        pass
+        """Bob listens to all 3 tracks on Digital Dreams — he should be
+        identified as having completed an album. Alice only listens to t1
+        and t2, so she should not appear in the result.
+        """
+        alice = platform.get_user("u1")
+        bob = platform.get_user("u2")
+        t1 = platform.get_track("t1")
+        t2 = platform.get_track("t2")
+        t3 = platform.get_track("t3")
+
+        # Bob completes the album
+        platform.record_session(ListeningSession("s1", bob, t1, RECENT, 180))
+        platform.record_session(ListeningSession("s2", bob, t2, RECENT, 210))
+        platform.record_session(ListeningSession("s3", bob, t3, RECENT, 195))
+
+        # Alice only listens to 2 of the 3 tracks
+        platform.record_session(ListeningSession("s4", alice, t1, RECENT, 180))
+        platform.record_session(ListeningSession("s5", alice, t2, RECENT, 210))
+
+        result = platform.users_who_completed_albums()
+        users_in_result = [u for u, _ in result]
+        assert bob in users_in_result
+        assert alice not in users_in_result
 
     def test_correct_album_titles(self, platform: StreamingPlatform) -> None:
-        pass
+        """When Bob completes Digital Dreams, the album title in the result
+        should be exactly 'Digital Dreams'.
+        """
+        bob = platform.get_user("u2")
+        t1 = platform.get_track("t1")
+        t2 = platform.get_track("t2")
+        t3 = platform.get_track("t3")
+
+        platform.record_session(ListeningSession("s1", bob, t1, RECENT, 180))
+        platform.record_session(ListeningSession("s2", bob, t2, RECENT, 210))
+        platform.record_session(ListeningSession("s3", bob, t3, RECENT, 195))
+
+        result = platform.users_who_completed_albums()
+        bob_entry = next((titles for u, titles in result if u.user_id == "u2"), None)
+        assert bob_entry is not None
+        assert "Digital Dreams" in bob_entry
